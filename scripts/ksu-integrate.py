@@ -305,6 +305,19 @@ PATCHES = [
             "\t\tksu_handle_input_handle_event(&type, &code, &value);"
         ),
     ),
+    # ---- kernel/reboot.c ------------------------------------------------
+    # Required: KernelSU-Next legacy Kbuild greps reboot.c for
+    # `ksu_handle_sys_reboot` to confirm manual hooks are integrated.
+    Patch(
+        "kernel/reboot.c",
+        sentinel="ksu_handle_sys_reboot",
+        extern_block=(
+            "extern int ksu_handle_sys_reboot(int magic1, int magic2,\n"
+            "                                 unsigned int cmd, void __user **arg);"
+        ),
+        anchor=r"SYSCALL_DEFINE4\s*\(\s*reboot\s*,",
+        hook="\tksu_handle_sys_reboot(magic1, magic2, cmd, (void __user **)&arg);",
+    ),
 ]
 
 
