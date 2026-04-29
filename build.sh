@@ -8,7 +8,7 @@
 #   dist/d2s/dtbo.img        (when overlays are produced by the tree)
 #   dist/d2s/AnyKernel3-d2s-<stamp>.zip
 #
-# Toolchain: Neutron Clang 18 (auto-downloaded into ./toolchain/neutron)
+# Toolchain: Proton Clang (kdrag0n/proton-clang) into ./toolchain/clang
 # ------------------------------------------------------------------
 
 set -euo pipefail
@@ -21,7 +21,7 @@ DEFCONFIG="${DEFCONFIG:-exynos9820-d2s_defconfig}"
 JOBS="$(nproc 2>/dev/null || echo 4)"
 OUT_DIR="$ROOT/out"
 DIST_DIR="$ROOT/dist/$MODEL"
-CLANG_DIR="$ROOT/toolchain/neutron"
+CLANG_DIR="$ROOT/toolchain/clang"
 
 log()  { printf '\033[1;34m[build]\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m[fail ]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -29,15 +29,14 @@ fail() { printf '\033[1;31m[fail ]\033[0m %s\n' "$*" >&2; exit 1; }
 mkdir -p "$OUT_DIR" "$DIST_DIR"
 
 # ------------------------------------------------------------------
-# 1. Toolchain
+# 1. Toolchain — Proton Clang (Clang 13, battle-tested on Exynos 4.14)
 # ------------------------------------------------------------------
 if [ ! -x "$CLANG_DIR/bin/clang" ]; then
-    log "Neutron Clang not found at $CLANG_DIR — fetching..."
-    mkdir -p "$CLANG_DIR"
-    pushd "$CLANG_DIR" >/dev/null
-    bash <(curl -fsSL "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman") -S=05012024
-    bash <(curl -fsSL "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman") --patch=glibc
-    popd >/dev/null
+    log "Proton Clang not found at $CLANG_DIR — cloning..."
+    rm -rf "$CLANG_DIR"
+    mkdir -p "$(dirname "$CLANG_DIR")"
+    git clone --depth=1 https://github.com/kdrag0n/proton-clang.git "$CLANG_DIR" \
+        || fail "git clone of proton-clang failed"
 fi
 
 export PATH="$CLANG_DIR/bin:${PATH}"
@@ -46,12 +45,15 @@ export SUBARCH=arm64
 export KBUILD_BUILD_USER="github-actions"
 export KBUILD_BUILD_HOST="d2s-builder"
 
-# Use ccache when available to speed re-builds
+# ccache wrappers if available
 if command -v ccache >/dev/null 2>&1; then
-    export KBUILD_COMPILER_STRING="$(clang --version | head -n1)"
     CC_WRAP="ccache clang"
+    HOSTCC_WRAP="ccache gcc"
+    HOSTCXX_WRAP="ccache g++"
 else
     CC_WRAP="clang"
+    HOSTCC_WRAP="gcc"
+    HOSTCXX_WRAP="g++"
 fi
 
 MAKE_ARGS=(
@@ -60,8 +62,8 @@ MAKE_ARGS=(
     LLVM=1
     LLVM_IAS=1
     CC="$CC_WRAP"
-    HOSTCC="ccache gcc"
-    HOSTCXX="ccache g++"
+    HOSTCC="$HOSTCC_WRAP"
+    HOSTCXX="$HOSTCXX_WRAP"
     CROSS_COMPILE=aarch64-linux-gnu-
     CROSS_COMPILE_ARM32=arm-linux-gnueabi-
     CLANG_TRIPLE=aarch64-linux-gnu-
@@ -83,13 +85,13 @@ make "${MAKE_ARGS[@]}" "$DEFCONFIG"
 log "Building kernel..."
 make -j"$JOBS" "${MAKE_ARGS[@]}" Image dtbs || fail "kernel build failed"
 
-# Optional compressed kernels — ignore if the tree does not enable them
+# Optional artifacts — ignore if the tree does not produce them
 make -j"$JOBS" "${MAKE_ARGS[@]}" Image.gz       2>/dev/null || true
 make -j"$JOBS" "${MAKE_ARGS[@]}" Image.gz-dtb   2>/dev/null || true
 make -j"$JOBS" "${MAKE_ARGS[@]}" dtbo.img       2>/dev/null || true
 
 # ------------------------------------------------------------------
-# 4. Assemble dtb.img
+# 4. Assemble dtb.img (concatenated DTBs for d2s)
 # ------------------------------------------------------------------
 KERNEL_IMG="$OUT_DIR/arch/arm64/boot/Image"
 [ -f "$KERNEL_IMG" ] || fail "kernel Image not found at $KERNEL_IMG"
@@ -98,7 +100,6 @@ log "Concatenating d2s DTBs..."
 DTB_OUT="$DIST_DIR/dtb.img"
 : > "$DTB_OUT"
 
-# Prefer d2s-specific DTBs if present, otherwise fall back to all exynos9820 DTBs
 mapfile -t DTBS < <(
     {
         find "$OUT_DIR/arch/arm64/boot/dts/samsung" -type f -name 'exynos9820-d2s*.dtb' 2>/dev/null
@@ -134,14 +135,12 @@ if [ ! -d "$AK3_DIR" ]; then
     git clone --depth=1 https://github.com/osm0sis/AnyKernel3 "$AK3_DIR"
 fi
 
-# Reset working tree and stage our files
 git -C "$AK3_DIR" reset --hard --quiet
 rm -f  "$AK3_DIR"/Image* "$AK3_DIR"/dtb* 2>/dev/null || true
 cp -v "$KERNEL_IMG" "$AK3_DIR/Image"
 [ -f "$DIST_DIR/dtb.img" ]  && cp -v "$DIST_DIR/dtb.img"  "$AK3_DIR/dtb.img"
 [ -f "$DIST_DIR/dtbo.img" ] && cp -v "$DIST_DIR/dtbo.img" "$AK3_DIR/dtbo.img"
 
-# Minimal d2s-aware anykernel.sh
 cat > "$AK3_DIR/anykernel.sh" <<'AKEOF'
 ### AnyKernel3 Ramdisk Mod Script
 properties() { '
