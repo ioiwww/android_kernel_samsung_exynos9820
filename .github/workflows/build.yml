@@ -87,9 +87,10 @@ jobs:
         if: ${{ env.KSU == 'yes' }}
         run: |
           set -e
-          # Official KernelSU-Next setup script — adds KernelSU-Next/ tree
-          # and patches drivers/Kconfig + drivers/Makefile.
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          # Official KernelSU-Next setup script — `legacy` branch is the one
+          # that supports non-GKI 4.14 kernels with manual hooks.
+          # The `dev`/default branch dropped manual hooks and assumes 5.10+.
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh" | bash -s legacy
 
       - name: Apply KernelSU-Next manual hooks + defconfig overrides
         if: ${{ env.KSU == 'yes' }}
