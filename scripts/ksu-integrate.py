@@ -70,7 +70,10 @@ EXPLICIT_DISABLE = [
     "CONFIG_RKP_CFP_JOPP",
     "CONFIG_KDP",
     "CONFIG_KDP_CRED",
-    "CONFIG_KNOX_NCM",
+    # NB: CONFIG_KNOX_NCM stays ENABLED — its symbols (check_ncm_flag,
+    # knox_collect_conntrack_data, check_intermediate_flag) are referenced
+    # UNCONDITIONALLY in net/core/sock.c, net/netfilter/nf_conntrack_core.c,
+    # and net/ipv4/udp.c.  Disabling it breaks the vmlinux link.
     "CONFIG_SECURITY_DEFEX",
     "CONFIG_FIVE",
     "CONFIG_PROCA",
@@ -86,7 +89,6 @@ DISABLE_RE = re.compile(
     r"UH|UH_.+|"
     r"RKP|RKP_.+|"
     r"KDP|KDP_.+|"
-    r"KNOX_NCM|"
     r"SECURITY_DEFEX|DEFEX_.+|"
     r"FIVE|FIVE_.+|"
     r"PROCA|PROCA_.+"
@@ -321,6 +323,94 @@ PATCHES = [
 ]
 
 
+# ---------------------------------------------------------------- path_umount
+# KernelSU-Next's drivers/kernelsu/feature/kernel_umount.c calls path_umount(),
+# which only exists upstream from Linux 5.9+.  KSU's own Kbuild tries to
+# inject path_umount + can_umount into fs/namespace.c via `$(shell sed -i …)`
+# at make-parse time, but on this tree the multi-line $(shell) recipe silently
+# fails to insert the function body — make still sets -DKSU_HAS_PATH_UMOUNT
+# (because the Kbuild grep races the sed exit), and the link step then dies
+# with "undefined symbol: path_umount".  Inject it ourselves before make runs.
+PATH_UMOUNT_BLOCK = """
+/* === KernelSU-Next path_umount backport (added by ksu-integrate.py) === */
+static int can_umount(const struct path *path, int flags)
+{
+\tstruct mount *mnt = real_mount(path->mnt);
+
+\tif (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))
+\t\treturn -EINVAL;
+\tif (!may_mount())
+\t\treturn -EPERM;
+\tif (path->dentry != path->mnt->mnt_root)
+\t\treturn -EINVAL;
+\tif (!check_mnt(mnt))
+\t\treturn -EINVAL;
+\tif (mnt->mnt.mnt_flags & MNT_LOCKED)
+\t\treturn -EINVAL;
+\tif (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))
+\t\treturn -EPERM;
+\treturn 0;
+}
+
+int path_umount(struct path *path, int flags)
+{
+\tstruct mount *mnt = real_mount(path->mnt);
+\tint ret;
+
+\tret = can_umount(path, flags);
+\tif (!ret)
+\t\tret = do_umount(mnt, flags);
+\tdput(path->dentry);
+\tmntput_no_expire(mnt);
+\treturn ret;
+}
+/* === end KernelSU-Next path_umount backport === */
+"""
+
+PATH_UMOUNT_SENTINEL = "KernelSU-Next path_umount backport"
+
+
+def inject_path_umount() -> None:
+    ns = ROOT / "fs/namespace.c"
+    ih = ROOT / "fs/internal.h"
+    if not ns.exists():
+        warn("fs/namespace.c missing — skipping path_umount backport")
+        return
+
+    text = ns.read_text()
+    if PATH_UMOUNT_SENTINEL in text or re.search(r"^int\s+path_umount\b", text, re.M):
+        info("fs/namespace.c: path_umount already present")
+    else:
+        anchor = re.compile(r"^static\s+bool\s+is_mnt_ns_file\b", re.M)
+        m = anchor.search(text)
+        if not m:
+            warn("fs/namespace.c: anchor `is_mnt_ns_file` not found — "
+                 "path_umount NOT injected")
+            return
+        new_text = text[:m.start()] + PATH_UMOUNT_BLOCK.lstrip("\n") + "\n" + text[m.start():]
+        ns.write_text(new_text)
+        info(f"fs/namespace.c: injected path_umount + can_umount "
+             f"before is_mnt_ns_file (offset {m.start()})")
+
+    if ih.exists():
+        h_text = ih.read_text()
+        if "int path_umount(" in h_text:
+            info("fs/internal.h: path_umount decl already present")
+        else:
+            decl = "int path_umount(struct path *path, int flags);"
+            new_h = re.sub(
+                r"(extern\s+void\s+__init\s+mnt_init\s*\([^)]*\)\s*;\s*\n)",
+                r"\1" + decl + "\n",
+                h_text, count=1,
+            )
+            if new_h == h_text:
+                warn("fs/internal.h: anchor `mnt_init` not found — "
+                     "path_umount decl NOT added")
+            else:
+                ih.write_text(new_h)
+                info("fs/internal.h: added path_umount declaration")
+
+
 # ---------------------------------------------------------------- drivers glue
 def patch_drivers_glue() -> None:
     kconfig  = ROOT / "drivers/Kconfig"
@@ -355,6 +445,7 @@ def main() -> int:
     patch_defconfig()
     for p in PATCHES:
         p.apply()
+    inject_path_umount()
     patch_drivers_glue()
     info("KernelSU-Next integration complete")
     return 0
