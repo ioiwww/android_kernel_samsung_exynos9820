@@ -51,9 +51,10 @@ def die(msg: str) -> None:
 # ---------------------------------------------------------------- defconfig
 ENABLE = [
     "CONFIG_KSU=y",
-    "CONFIG_KPROBES=y",
-    "CONFIG_HAVE_KPROBES=y",
-    "CONFIG_KPROBE_EVENTS=y",
+    # Force manual-hook mode. KernelSU-Next's KPROBES path requires
+    # syscall_fn_t (5.10+), which Linux 4.14 does not have; manual hooks
+    # are exactly what scripts/ksu-integrate.py injects below.
+    "CONFIG_KSU_MANUAL_HOOK=y",
     "CONFIG_OVERLAY_FS=y",
     "CONFIG_TMPFS_XATTR=y",
 ]
@@ -73,6 +74,9 @@ EXPLICIT_DISABLE = [
     "CONFIG_SECURITY_DEFEX",
     "CONFIG_FIVE",
     "CONFIG_PROCA",
+    # Force OFF the kprobes-based hook path inside KernelSU-Next; we use
+    # manual hooks via scripts/ksu-integrate.py.
+    "CONFIG_KSU_KPROBES_HOOK",
 ]
 
 # Exact-name suffix regex (after stripping CONFIG_ prefix).  Anchored so
