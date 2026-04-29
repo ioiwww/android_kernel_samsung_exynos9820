@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       ksu:
-        description: "Include KernelSU-Next"
+        description: "Include KernelSU-Next (manual hooks)"
         required: true
         default: "yes"
         type: choice
@@ -24,6 +24,7 @@ on:
       - lineage-23.2
     paths:
       - "build.sh"
+      - "scripts/ksu-integrate.py"
       - ".github/workflows/build.yml"
       - "arch/arm64/configs/exynos9820-d2s_defconfig"
 
@@ -35,7 +36,7 @@ jobs:
   build:
     name: Build kernel for d2s
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     env:
       MODEL: d2s
@@ -54,9 +55,10 @@ jobs:
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             git build-essential bc bison flex libssl-dev libelf-dev \
-            zip unzip cpio kmod ccache rsync python3 python3-pip \
+            zip unzip cpio kmod ccache rsync python3 \
             curl wget ca-certificates xz-utils file gawk \
             zlib1g-dev libncurses-dev gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi \
             device-tree-compiler
 
       - name: Setup ccache
@@ -65,45 +67,39 @@ jobs:
           key: ${{ runner.os }}-ccache-d2s-${{ env.KSU }}
           max-size: 2G
 
-      - name: Cache Neutron Clang toolchain
+      - name: Cache Proton Clang toolchain
         id: cache-toolchain
         uses: actions/cache@v4
         with:
-          path: toolchain/neutron
-          key: neutron-clang-18-05012024
+          path: toolchain/clang
+          key: proton-clang-master-v2
 
-      - name: Download Neutron Clang 18
+      - name: Download Proton Clang
         if: steps.cache-toolchain.outputs.cache-hit != 'true'
         run: |
-          mkdir -p toolchain/neutron
-          cd toolchain/neutron
-          bash <(curl -s "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman") -S=05012024
-          bash <(curl -s "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman") --patch=glibc
+          set -e
+          rm -rf toolchain/clang
+          mkdir -p toolchain
+          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git toolchain/clang
+          ls toolchain/clang/bin/clang
 
-      - name: Integrate KernelSU-Next
+      - name: Integrate KernelSU-Next (setup.sh)
         if: ${{ env.KSU == 'yes' }}
         run: |
           set -e
-          # Pull official KernelSU-Next setup script (supports non-GKI trees like 4.14)
+          # Official KernelSU-Next setup script — adds KernelSU-Next/ tree
+          # and patches drivers/Kconfig + drivers/Makefile.
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
 
-          # Force-enable KSU in the d2s defconfig so it gets compiled in
-          DEF=arch/arm64/configs/exynos9820-d2s_defconfig
-          {
-            echo ""
-            echo "# === KernelSU-Next ==="
-            echo "CONFIG_KSU=y"
-            echo "CONFIG_KSU_SUSFS=n"
-            echo "CONFIG_KPROBES=y"
-            echo "CONFIG_HAVE_KPROBES=y"
-            echo "CONFIG_KPROBE_EVENTS=y"
-            echo "CONFIG_OVERLAY_FS=y"
-          } >> "$DEF"
-
-          # Stamp KSU version for traceability
-          if [ -f KernelSU-Next/kernel/Makefile ]; then
-            echo "[KSU] integrated into kernel tree"
-          fi
+      - name: Apply KernelSU-Next manual hooks + defconfig overrides
+        if: ${{ env.KSU == 'yes' }}
+        run: |
+          set -e
+          chmod +x scripts/ksu-integrate.py
+          python3 scripts/ksu-integrate.py
+          echo "--- defconfig diff (KSU + Samsung security flags) ---"
+          grep -E '^(CONFIG_KSU|CONFIG_KPROBES|CONFIG_OVERLAY_FS|# CONFIG_(UH|RKP|KDP|KNOX|SECURITY_DEFEX|FIVE|PROCA))' \
+            arch/arm64/configs/exynos9820-d2s_defconfig || true
 
       - name: Build kernel
         run: |
@@ -118,25 +114,22 @@ jobs:
           STAGE=release/d2s
           mkdir -p "$STAGE"
 
-          # Mandatory artifacts
           cp -v "$OUT/Image" "$STAGE/Image"
           [ -f "$OUT/Image.gz" ]      && cp -v "$OUT/Image.gz"      "$STAGE/" || true
           [ -f "$OUT/Image.gz-dtb" ]  && cp -v "$OUT/Image.gz-dtb"  "$STAGE/" || true
-          [ -f release/d2s/dtb.img ]  || cp -v dist/d2s/dtb.img     "$STAGE/dtb.img"  2>/dev/null || true
-          [ -f release/d2s/dtbo.img ] || cp -v dist/d2s/dtbo.img    "$STAGE/dtbo.img" 2>/dev/null || true
-
-          # AnyKernel3 zip (created by build.sh) goes alongside
+          [ -f dist/d2s/dtb.img  ]    && cp -v dist/d2s/dtb.img     "$STAGE/dtb.img"  || true
+          [ -f dist/d2s/dtbo.img ]    && cp -v dist/d2s/dtbo.img    "$STAGE/dtbo.img" || true
           if ls dist/d2s/AnyKernel3-*.zip >/dev/null 2>&1; then
             cp -v dist/d2s/AnyKernel3-*.zip "$STAGE/"
           fi
-
           ls -lah "$STAGE"
 
           STAMP=$(date -u +%Y%m%d-%H%M%S)
           SHA=$(git rev-parse --short HEAD)
-          echo "stamp=${STAMP}" >> "$GITHUB_OUTPUT"
-          echo "sha=${SHA}"     >> "$GITHUB_OUTPUT"
-          echo "artifact_name=d2s-kernel-${{ env.KSU == 'yes' && 'ksu-' || '' }}${STAMP}-${SHA}" >> "$GITHUB_OUTPUT"
+          KSU_TAG=""; [ "${{ env.KSU }}" = "yes" ] && KSU_TAG="ksu-"
+          echo "stamp=${STAMP}"                                   >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}"                                       >> "$GITHUB_OUTPUT"
+          echo "artifact_name=d2s-kernel-${KSU_TAG}${STAMP}-${SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
@@ -157,7 +150,7 @@ jobs:
             - Branch: `${{ github.ref_name }}`
             - Commit: `${{ steps.stage.outputs.sha }}`
             - KernelSU-Next: `${{ env.KSU }}`
-            - Toolchain: Neutron Clang 18 (05012024)
+            - Toolchain: Proton Clang
           files: release/d2s/**
           fail_on_unmatched_files: false
         env:
