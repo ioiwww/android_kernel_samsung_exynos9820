@@ -1,0 +1,164 @@
+name: Build d2s Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu:
+        description: "Include KernelSU-Next"
+        required: true
+        default: "yes"
+        type: choice
+        options:
+          - "yes"
+          - "no"
+      release:
+        description: "Create a GitHub Release with the artifacts"
+        required: true
+        default: "no"
+        type: choice
+        options:
+          - "yes"
+          - "no"
+  push:
+    branches:
+      - lineage-23.2
+    paths:
+      - "build.sh"
+      - ".github/workflows/build.yml"
+      - "arch/arm64/configs/exynos9820-d2s_defconfig"
+
+concurrency:
+  group: build-d2s-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build kernel for d2s
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    env:
+      MODEL: d2s
+      DEFCONFIG: exynos9820-d2s_defconfig
+      KSU: ${{ github.event.inputs.ksu || 'yes' }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git build-essential bc bison flex libssl-dev libelf-dev \
+            zip unzip cpio kmod ccache rsync python3 python3-pip \
+            curl wget ca-certificates xz-utils file gawk \
+            zlib1g-dev libncurses-dev gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            device-tree-compiler
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ runner.os }}-ccache-d2s-${{ env.KSU }}
+          max-size: 2G
+
+      - name: Cache Neutron Clang toolchain
+        id: cache-toolchain
+        uses: actions/cache@v4
+        with:
+          path: toolchain/neutron
+          key: neutron-clang-18-05012024
+
+      - name: Download Neutron Clang 18
+        if: steps.cache-toolchain.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p toolchain/neutron
+          cd toolchain/neutron
+          bash <(curl -s "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman") -S=05012024
+          bash <(curl -s "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman") --patch=glibc
+
+      - name: Integrate KernelSU-Next
+        if: ${{ env.KSU == 'yes' }}
+        run: |
+          set -e
+          # Pull official KernelSU-Next setup script (supports non-GKI trees like 4.14)
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+
+          # Force-enable KSU in the d2s defconfig so it gets compiled in
+          DEF=arch/arm64/configs/exynos9820-d2s_defconfig
+          {
+            echo ""
+            echo "# === KernelSU-Next ==="
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KSU_SUSFS=n"
+            echo "CONFIG_KPROBES=y"
+            echo "CONFIG_HAVE_KPROBES=y"
+            echo "CONFIG_KPROBE_EVENTS=y"
+            echo "CONFIG_OVERLAY_FS=y"
+          } >> "$DEF"
+
+          # Stamp KSU version for traceability
+          if [ -f KernelSU-Next/kernel/Makefile ]; then
+            echo "[KSU] integrated into kernel tree"
+          fi
+
+      - name: Build kernel
+        run: |
+          chmod +x ./build.sh
+          ./build.sh
+
+      - name: Stage release files
+        id: stage
+        run: |
+          set -e
+          OUT=out/arch/arm64/boot
+          STAGE=release/d2s
+          mkdir -p "$STAGE"
+
+          # Mandatory artifacts
+          cp -v "$OUT/Image" "$STAGE/Image"
+          [ -f "$OUT/Image.gz" ]      && cp -v "$OUT/Image.gz"      "$STAGE/" || true
+          [ -f "$OUT/Image.gz-dtb" ]  && cp -v "$OUT/Image.gz-dtb"  "$STAGE/" || true
+          [ -f release/d2s/dtb.img ]  || cp -v dist/d2s/dtb.img     "$STAGE/dtb.img"  2>/dev/null || true
+          [ -f release/d2s/dtbo.img ] || cp -v dist/d2s/dtbo.img    "$STAGE/dtbo.img" 2>/dev/null || true
+
+          # AnyKernel3 zip (created by build.sh) goes alongside
+          if ls dist/d2s/AnyKernel3-*.zip >/dev/null 2>&1; then
+            cp -v dist/d2s/AnyKernel3-*.zip "$STAGE/"
+          fi
+
+          ls -lah "$STAGE"
+
+          STAMP=$(date -u +%Y%m%d-%H%M%S)
+          SHA=$(git rev-parse --short HEAD)
+          echo "stamp=${STAMP}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}"     >> "$GITHUB_OUTPUT"
+          echo "artifact_name=d2s-kernel-${{ env.KSU == 'yes' && 'ksu-' || '' }}${STAMP}-${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.stage.outputs.artifact_name }}
+          path: release/d2s/**
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create Release
+        if: ${{ github.event.inputs.release == 'yes' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: d2s-${{ steps.stage.outputs.stamp }}
+          name: d2s ${{ steps.stage.outputs.stamp }} (${{ steps.stage.outputs.sha }})
+          body: |
+            Automated build of `android_kernel_samsung_exynos9820` for **d2s** (Galaxy S10+).
+            - Branch: `${{ github.ref_name }}`
+            - Commit: `${{ steps.stage.outputs.sha }}`
+            - KernelSU-Next: `${{ env.KSU }}`
+            - Toolchain: Neutron Clang 18 (05012024)
+          files: release/d2s/**
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
