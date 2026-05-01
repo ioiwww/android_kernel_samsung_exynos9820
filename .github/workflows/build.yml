@@ -1,4 +1,4 @@
-name: Build d2s Kernel
+name: Build Multi-Device Kernel
 
 on:
   workflow_dispatch:
@@ -26,21 +26,41 @@ on:
       - "build.sh"
       - "scripts/ksu-integrate.py"
       - ".github/workflows/build.yml"
-      - "arch/arm64/configs/exynos9820-d2s_defconfig"
+      - "arch/arm64/configs/exynos9820-*"
 
 concurrency:
-  group: build-d2s-${{ github.ref }}
+  group: build-kernels-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Build kernel for d2s
+    name: Build for ${{ matrix.device }}
     runs-on: ubuntu-22.04
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - device: d2s
+            defconfig: exynos9820-d2s_defconfig
+          - device: d2x
+            defconfig: exynos9820-d2x_defconfig
+          - device: d1
+            defconfig: exynos9820-d1_defconfig
+          - device: d1x
+            defconfig: exynos9820-d1x_defconfig
+          - device: beyond0lte
+            defconfig: exynos9820-beyond0lte_defconfig
+          - device: beyond1lte
+            defconfig: exynos9820-beyond1lte_defconfig
+          - device: beyond2lte
+            defconfig: exynos9820-beyond2lte_defconfig
+          - device: beyondx
+            defconfig: exynos9820-beyondx_defconfig
 
     env:
-      MODEL: d2s
-      DEFCONFIG: exynos9820-d2s_defconfig
+      MODEL: ${{ matrix.device }}
+      DEFCONFIG: ${{ matrix.defconfig }}
       KSU: ${{ github.event.inputs.ksu || 'yes' }}
 
     steps:
@@ -64,7 +84,7 @@ jobs:
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: ${{ runner.os }}-ccache-d2s-${{ env.KSU }}
+          key: ${{ runner.os }}-ccache-${{ matrix.device }}-${{ env.KSU }}
           max-size: 2G
 
       - name: Cache Proton Clang toolchain
@@ -81,26 +101,20 @@ jobs:
           rm -rf toolchain/clang
           mkdir -p toolchain
           git clone --depth=1 https://github.com/kdrag0n/proton-clang.git toolchain/clang
-          ls toolchain/clang/bin/clang
 
-      - name: Integrate KernelSU-Next (setup.sh)
+      - name: Integrate KernelSU-Next
         if: ${{ env.KSU == 'yes' }}
         run: |
           set -e
-          # Official KernelSU-Next setup script — `legacy` branch is the one
-          # that supports non-GKI 4.14 kernels with manual hooks.
-          # The `dev`/default branch dropped manual hooks and assumes 5.10+.
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh" | bash -s legacy
 
-      - name: Apply KernelSU-Next manual hooks + defconfig overrides
+      - name: Apply KernelSU-Next manual hooks
         if: ${{ env.KSU == 'yes' }}
         run: |
           set -e
           chmod +x scripts/ksu-integrate.py
           python3 scripts/ksu-integrate.py
-          echo "--- defconfig diff (KSU + Samsung security flags) ---"
-          grep -E '^(CONFIG_KSU|CONFIG_KPROBES|CONFIG_OVERLAY_FS|# CONFIG_(UH|RKP|KDP|KNOX|SECURITY_DEFEX|FIVE|PROCA))' \
-            arch/arm64/configs/exynos9820-d2s_defconfig || true
+          grep -E '^(CONFIG_KSU|CONFIG_KPROBES)' arch/arm64/configs/${{ matrix.defconfig }} || true
 
       - name: Build kernel
         run: |
@@ -112,47 +126,49 @@ jobs:
         run: |
           set -e
           OUT=out/arch/arm64/boot
-          STAGE=release/d2s
+          STAGE=release/${{ matrix.device }}
           mkdir -p "$STAGE"
 
-          cp -v "$OUT/Image" "$STAGE/Image"
-          [ -f "$OUT/Image.gz" ]      && cp -v "$OUT/Image.gz"      "$STAGE/" || true
-          [ -f "$OUT/Image.gz-dtb" ]  && cp -v "$OUT/Image.gz-dtb"  "$STAGE/" || true
-          [ -f dist/d2s/dtb.img  ]    && cp -v dist/d2s/dtb.img     "$STAGE/dtb.img"  || true
-          [ -f dist/d2s/dtbo.img ]    && cp -v dist/d2s/dtbo.img    "$STAGE/dtbo.img" || true
-          if ls dist/d2s/AnyKernel3-*.zip >/dev/null 2>&1; then
-            cp -v dist/d2s/AnyKernel3-*.zip "$STAGE/"
+          # نسخ الـ Zip الخاص بـ AnyKernel3 فقط
+          if ls dist/${{ matrix.device }}/AnyKernel3-*.zip >/dev/null 2>&1; then
+            cp -v dist/${{ matrix.device }}/AnyKernel3-*.zip "$STAGE/"
           fi
-          ls -lah "$STAGE"
+          
+          # نسخة احتياطية من ملف Image
+          cp -v "$OUT/Image" "$STAGE/Image" || true
 
-          STAMP=$(date -u +%Y%m%d-%H%M%S)
+          STAMP=$(date -u +%Y%m%d-%H%M)
           SHA=$(git rev-parse --short HEAD)
-          KSU_TAG=""; [ "${{ env.KSU }}" = "yes" ] && KSU_TAG="ksu-"
-          echo "stamp=${STAMP}"                                   >> "$GITHUB_OUTPUT"
-          echo "sha=${SHA}"                                       >> "$GITHUB_OUTPUT"
-          echo "artifact_name=d2s-kernel-${KSU_TAG}${STAMP}-${SHA}" >> "$GITHUB_OUTPUT"
+          echo "stamp=${STAMP}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=${{ matrix.device }}-kernel-${STAMP}" >> "$GITHUB_OUTPUT"
 
       - name: Upload kernel artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.stage.outputs.artifact_name }}
-          path: release/d2s/**
+          path: release/${{ matrix.device }}/*.zip
           if-no-files-found: error
-          retention-days: 30
+
+  create_release:
+    if: ${{ github.event.inputs.release == 'yes' }}
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
 
       - name: Create Release
-        if: ${{ github.event.inputs.release == 'yes' }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: d2s-${{ steps.stage.outputs.stamp }}
-          name: d2s ${{ steps.stage.outputs.stamp }} (${{ steps.stage.outputs.sha }})
+          tag_name: Build-${{ github.run_id }}
+          name: Multi-Device Release (${{ github.run_id }})
           body: |
-            Automated build of `android_kernel_samsung_exynos9820` for **d2s** (Galaxy S10+).
-            - Branch: `${{ github.ref_name }}`
-            - Commit: `${{ steps.stage.outputs.sha }}`
-            - KernelSU-Next: `${{ env.KSU }}`
-            - Toolchain: Proton Clang
-          files: release/d2s/**
-          fail_on_unmatched_files: false
+            Automated build for Exynos 9820 devices.
+            - KernelSU-Next: `${{ github.event.inputs.ksu }}`
+            - Devices: d1, d1x, d2s, d2x, beyond0/1/2/x
+          files: all-artifacts/**/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
