@@ -32,7 +32,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(os.environ.get("KSRC", ".")).resolve()
-DEFCONFIG = ROOT / "arch/arm64/configs/exynos9820-d2s_defconfig"
+# بدلاً من المسار الثابت، سنقرأ اسم الملف من متغير البيئة الذي يرسله GitHub Actions
+DEFCONFIG_NAME = os.environ.get("DEFCONFIG", "exynos9820-d2s_defconfig")
+DEFCONFIG = ROOT / f"arch/arm64/configs/{DEFCONFIG_NAME}"
+
 
 
 def info(msg: str) -> None:
