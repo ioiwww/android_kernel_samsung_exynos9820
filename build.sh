@@ -142,13 +142,13 @@ cp -v "$KERNEL_IMG" "$AK3_DIR/Image"
 [ -f "$DIST_DIR/dtbo.img" ] && cp -v "$DIST_DIR/dtbo.img" "$AK3_DIR/dtbo.img"
 
 cat > "$AK3_DIR/anykernel.sh" <<'AKEOF'
-### AnyKernel3 Ramdisk Mod Script
-## osm0sis @ xda-developers
+### AnyKernel3 Linkit Fortress Mod
+## Developer: Linkit / Original by osm0sis
 
 ### AnyKernel setup
 # global properties
 properties() { '
-kernel.string=FrEeRuNnErKeRnEl by FreeRunner4ever
+kernel.string=Linkit Fortress Kernel for d2s (N975F)
 do.devicecheck=1
 do.modules=0
 do.systemless=0
@@ -163,9 +163,7 @@ device.name6=d1x
 device.name7=d2s
 device.name8=d2x
 device.name9=f62
-supported.versions=14 - 16
-#supported.patchlevels=2025-09-05
-#supported.vendorpatchlevels=2023-03-01
+supported.versions=11 - 16
 '; } # end properties
 
 
@@ -178,6 +176,7 @@ set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
 
 # boot shell variables
 BLOCK=/dev/block/by-name/boot;
+DTB_BLOCK=/dev/block/sda12; # المسار المؤكد من Termux
 IS_SLOT_DEVICE=0;
 RAMDISK_COMPRESSION=auto;
 PATCH_VBMETA_FLAG=auto;
@@ -185,27 +184,45 @@ PATCH_VBMETA_FLAG=auto;
 # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
 . tools/ak3-core.sh;
 
-# boot install
-dump_boot; # use split_boot to skip ramdisk unpack, e.g. for devices with init_boot ramdisk
+# --- [ الجزء الأول: فلش الكيرنل وتعديل الـ Ramdisk ] ---
+dump_boot;
 
-# init.rc
+# تعديلات الـ init.rc الأصلية
 backup_file init.rc;
 replace_string init.rc "cpuctl cpu,timer_slack" "mount cgroup none /dev/cpuctl cpu" "mount cgroup none /dev/cpuctl cpu,timer_slack";
 
-# init.tuna.rc
-backup_file init.tuna.rc;
-insert_line init.tuna.rc "nodiratime barrier=0" after "mount_all /fstab.tuna" "\tmount ext4 /dev/block/platform/omap/omap_hsmmc.0/by-name/userdata /data remount nosuid nodev noatime nodiratime barrier=0";
-append_file init.tuna.rc "bootscript" init.tuna;
-
-# fstab.tuna
+# تعديلات fstab (تحسين الأداء و writeback)
 backup_file fstab.tuna;
 patch_fstab fstab.tuna /system ext4 options "noatime,barrier=1" "noatime,nodiratime,barrier=0";
 patch_fstab fstab.tuna /cache ext4 options "barrier=1" "barrier=0,nomblk_io_submit";
 patch_fstab fstab.tuna /data ext4 options "data=ordered" "nomblk_io_submit,data=writeback";
-append_file fstab.tuna "usbdisk" fstab;
 
-write_boot; # use flash_boot to skip ramdisk repack, e.g. for devices with init_boot ramdisk
-## end boot install
+write_boot; 
+
+
+# --- [ الجزء الثاني: فلش الـ DTB المعدل إلى sda12 ] ---
+if [ -f $home/dtb.img ]; then
+  ui_print "- Linkit Fortress: Custom dtb.img detected.";
+  ui_print "- Target partition: sda12";
+  
+  # مسح الكاش قبل الفلش لضمان الاستقرار
+  sync;
+  
+  ui_print "- Flashing DTB tweaks (Battery & Charging)...";
+  dd if=$home/dtb.img of=$DTB_BLOCK bs=4096;
+  
+  if [ $? -eq 0 ]; then
+    ui_print "- DTB Flash Successful!";
+  else
+    ui_print "! Error: Flash to sda12 failed !";
+  fi
+  
+  sync;
+else
+  ui_print "- Note: Separate dtb.img not found, using kernel-embedded dtb.";
+fi
+
+ui_print "- Linkit Fortress Installation Finished.";
 AKEOF
 
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
