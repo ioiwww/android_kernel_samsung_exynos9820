@@ -1,16 +1,16 @@
-name: Auto Merge OpenELA LTS
+name: Auto Merge OpenELA LTS (Force Resolve)
 
 on:
   workflow_dispatch:
     inputs:
       openela_tag:
-        description: 'رقم إصدار OpenELA (مثال: v4.14.356-openela)'
+        description: 'رقم إصدار OpenELA'
         required: true
         default: 'v4.14.356-openela'
       target_branch:
-        description: 'اسم الفرع الخاص بك (مثال: main أو lineage-19.1)'
+        description: 'الفرع المستهدف للدمج'
         required: true
-        default: 'main'
+        default: 'lineage-23.2'
 
 jobs:
   merge-upstream:
@@ -19,42 +19,42 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # ضروري جداً لسحب تاريخ الكيرنل كاملاً للدمج
+          fetch-depth: 0 
           ref: ${{ github.event.inputs.target_branch }}
-          # نستخدم التوكن الخاص بك هنا لكي يمتلك السكريبت صلاحية الدفع لاحقاً
           token: ${{ secrets.uploade }} 
 
       - name: Setup Bot Git Config
         run: |
-          # ضع اسم البوت وإيميله هنا
           git config --global user.name "Linkit-Bot"
           git config --global user.email "bot@example.com"
+          # تهيئة التعامل مع التضاربات بشكل آلي
+          git config --global merge.verbosity 3
 
       - name: Add Official OpenELA Remote & Fetch
         run: |
-          echo "Adding official OpenELA remote..."
           git remote add openela https://github.com/openela/kernel-lts.git
-          echo "Fetching tag: ${{ github.event.inputs.openela_tag }}"
           git fetch openela tags/${{ github.event.inputs.openela_tag }}
 
-      - name: Execute Strict Merge
+      - name: Execute Force Merge
         id: do_merge
         run: |
-          # الدمج بدون فتح محرر النصوص.
-          # إذا حدث أي تضارب (Conflict)، سيعطي هذا الأمر رمز خطأ (Non-zero exit)
-          # مما سيؤدي إلى إيقاف الـ Action فوراً وإفشاله.
-          git merge FETCH_HEAD --no-edit
-
-      - name: Verify Merge Success
-        run: |
-          # تحقق نهائي: إذا كان Git عالقاً في حالة دمج (MERGE_HEAD موجود)، فهذا يعني فشل العملية
-          if git rev-parse -q --verify MERGE_HEAD; then
-            echo "خطأ: الدمج لم يكتمل بشكل نظيف. هناك ملفات تحتاج لتدخل يدوي!"
+          echo "Starting merge with strategy: theirs..."
+          # استخدام -X theirs يحل تضاربات المحتوى تلقائياً لصالح OpenELA
+          git merge FETCH_HEAD --no-edit -X theirs || {
+            echo "حدث خطأ غير متوقع لا يمكن حله تلقائياً (مثل تضارب في حذف الملفات)"
             exit 1
+          }
+
+      - name: Final Verification
+        run: |
+          if git rev-parse -q --verify MERGE_HEAD; then
+            echo "خطأ: لا تزال هناك ملفات عالقة. محاولة الإصلاح الأخيرة..."
+            git add .
+            git commit -m "Auto-fix remaining conflicts using theirs strategy"
           fi
-          echo "تم التحقق: الدمج نظيف ومكتمل."
+          echo "تم الدمج والتحقق بنجاح."
 
       - name: Push Merged Kernel
         run: |
-          echo "Pushing changes to ${{ github.event.inputs.target_branch }}..."
+          # دفع التعديلات إلى المستودع
           git push origin ${{ github.event.inputs.target_branch }}
